@@ -1,0 +1,505 @@
+Design considerations and choices
+
+1  General considerations
+
+1.1  MVC
+
+The application is organized as a model-view-controller (MVC).
+The view is Spring GUI. There are actually three views for the three
+application modes: database server (ServerView), network client
+(NetworkClientView), and standalone client (StandaloneClientView).
+The model is the ContractorManager.
+The controller functionality is integrated in the event handling code
+of the respective views. There is really not much to do for a controller
+apart from collecting the text string values of the text input fields and
+calling the respective business services method. All the database access
+is hidden inside the contractor manager (that is, inside the model).
+So the fact that there is a business services interface implemented by
+the contractor manager renders a controller object unnecessary.
+(This would be quite different if there was no business services interface and
+the database access code was made available to the client.
+Then, the internal logic of the ContractorManager would have to be
+implemented by a controller on the client side.)
+
+So, the MVC has been adapted in a modified form: on the server side - the model
+(ContractorManager) - and on the client side the views with integrated
+controller code.
+
+The reason the MVC paradigm was adapted is clear separation of concern
+and extensibility. The application would be quite easily extensible toward
+a Web-based environment. Only the view side had to be exchanged (using JSF or
+a similar technology) and the network (RMI) code possibly replaced,
+but all the server-side DAO and model code
+(in the packages suncertify.db and suncertify.services) could be taken over
+unchanged.
+
+1.2  Lean clients
+
+A decision was made in favor of lean (thin) clients.
+A user request (search, book) is forwarded as a client request straight to
+the server. The server then processes the request.
+This has several implications.
+The server exports a business services interface rather than the data access
+interface. Clients do not need to be concerned with record locking
+or any other database operation - all this is done by the server in a single
+client request. This helps tremendously to avoid deadlock situations.
+Since it is the server that releases the lock on a record in the same client
+request the lock was acquired, it is guaranteed that no deadlock will ever
+occur due to misconduct on the part of a client. For this strategy to work
+it is crucial that client requests be processed fast so that a record remains
+locked for a relatively short time span. In particular, a client cannot
+delay unlocking of a record (or the database, for that matter).
+
+The price to be paid for lean clients is a new business services interface
+that has to be extended each time the client functionality is extended.
+Extending the business services interface means writing new server-side code.
+
+However, the lean client paradigm eases the task of porting the application to
+other environments, e.g. a Web-based environment, because the business logic
+is now in the model rather than a controller on the client side, and thus
+does not need to be rewritten (unlike the client-side view-controller). 
+
+1.3  Design patterns
+
+There are a number of design patterns applied in the context of this project:
+- MVC: The model component is ContractorManager, the view component is the
+  Swing GUI (originating from ServerView, NetworkClientView,
+  StandaloneClientView), and the controller component consists of
+  event handling code (the so-called listeners). There is no explicit
+  controller object. The controller code is embedded in the views.
+- Singleton: As there is just one database, the data access class Data is a
+  Singleton, as is the class DBFileAccess.
+- Adapter: ContractorManagerRemoteImpl is an adapter for ContractorManager.
+- Business Delegate: Remote interface through RMI.
+- Data Access Objects: The Data class.
+- Lean Clients: By introducing a business services interface.
+- Factory Method: ContractorManagerConnector has two factory methods
+  to provide local as well as remote access to the
+  business services interface.
+
+
+2  Database access
+
+2.1  Write-through cache
+
+The data is cached in memory with the database managed as a write-through cache.
+Thus, read operations on the data become very fast. Also, read access may be
+concurrent. A write operation still needs exclusive access on both the cache and
+the database file. However, the server may terminate very fast without loss of
+data, as the database file is kept up to date with each write operation.
+
+On the downside, the whole database has to be read into memory which could
+become a concern if the database contained many records. But even then, the
+application framework could still be used if extended by a more sophisticated
+cache strategy.
+
+2.2  Separation of concern through multi-layered database access
+
+The database access is separated into two layers: the lower layer with access
+on the file level (implemented in DBFileAccess) and the upper layer with access
+on the cache level (implemented in Data which might as well have been named
+DBCacheAccess). All the file access operations are called from methods of the
+Data (cache access) class. I.e., no client of the DAO is allowed to access the
+database file directly. Therefore, the file access operations in DBFileAccess
+are not thread-safe. Synchronization and locking is implemented in the cache
+access layer.  
+
+2.3  Locking strategy
+
+Locking is implemented in the database cache-access (Data) class using a
+single ReentrantReadWriteLock object. A reentrant read/write lock allows
+particularly efficient read access on the data. As all the records are cached
+in memory, various read operations from different clients can take place
+in parallel. This is particularly useful considering that as the various
+search methods do not change the database, only the read lock is needed for
+searching.
+
+A method that needs to access the database first has to acquire a lock
+(read or write) on the database. This is done in a try-finally framework where,
+in the finally clause, the lock is always unlocked.
+
+A thread that was granted read access may read database records at will,
+knowing that no other thread is allowed to write as long as the reading thread
+holds the read lock.
+
+A thread that holds a write lock must check a map of (record number, LockInfo)
+pairs first. For each record that has been locked via lockRecord, an object
+of type LockInfo is created and put into the map with its record number as the
+key. LockInfo contains the thread ID of the thread that holds the lock on the
+record, the cookie, and a hold count that is needed for reentrancy.  If a thread
+that wants a lock on a record determines that a LockInfo object is in the map
+under this record's record number, and the LockInfo tells that the record
+has been locked by a different thread, the current thread has to wait - which
+it does by calling waitUninterruptibly on the condition lockInfoRemoved
+derived from the write lock component of the overall reentrant read/write lock.
+
+When calling unlock, a thread must first acquire a global write lock.
+The LockInfo object corresponding to the record to unlock is tracked down
+in the map of locked records and its hold count is decremented.
+When the cold count becomes zero, the LockInfo object is removed from the map
+and this removal is signaled on the above-mentioned condition:
+lockInfoRemoved.signalAll. All the threads having been waiting on the condition
+are now awoke (one after the other) and may re-check the map of locked records.
+If the LockInfo entry of their particular record
+(identified via its record number key) isn't in the map anymore,
+the thread may now acquire the lock itself by creating a new LockInfo object
+with his own thread ID and putting it in the map of locked records.
+
+This way, only one object of type ReentrantReadWriteLock is needed regardless
+of the number of locked records or any other variable. Moreover, read access on
+the database can be performed in parallel. 
+
+2.4  Record numbers are kept separate from their respective records
+
+Conceptually, a record number is a record's primary key. Nevertheless,
+a record number has not been made a property (member) of a database record.
+A database record is totally unaware of its record number.
+Therefore, records and record numbers have to be kept in close proximity and,
+more importantly, updated together in atomic operations.
+The preferred way to store records is as values of a map with
+record numbers as the keys. Keeping record numbers separate from records makes
+it very easy and efficient (and comprehensible) to use the most appropriate
+collection classes (e.g. HashMap, TreeSet) without having to define comparators.
+
+The main reason records and record numbers are separate entities is the fact
+that the database interface provided by Sun (DBAccess) already makes this
+separation.
+
+When exchanging records between client and server, however, records are
+converted into Contractor objects. Such a Contractor object, too, does not
+contain a record number. Conceptually, a contractor is unaware of any database.
+
+2.5  Search strategy
+
+The search operation is conducted on the server side in an atomic operation.
+After a read lock on the database is acquired, all matching records are
+searched and copied into a search results map (with record numbers as keys).
+After all the records in the database have been searched, the read lock is
+released and the search results map (consisting of real copies of records)
+is returned. For this strategy to work efficiently, a new search method had
+to be introduced: findByCriteriaExactMatches of DBSearchFriendlyAccess, an
+extension of DBAccess. Apart from finding only the exact matches (as required)
+and not the partial ones (as findByCriteria of DBAccess), the new find method
+returns a map of (record number, record) pairs rather than a long array
+of record numbers. This guarantees that the whole search process takes place
+in one atomic operation. The search results are correct for a particular point
+in time regardless of any other modifications on the database. 
+
+2.6  Extensions of the supplied data access interface DBAccess
+
+The Sun-supplied data access interface DBAccess has been extended by an
+interface named DBSearchFriendlyAccess whose most important contribution is
+a modified search method, findByCriteriaExactMatches. Not only does this method
+check on exact rather than partial matches. It also delivers the matching
+records (clones thereof) together with their record numbers.
+This way, the search results are unaffected of subsequent modification by some
+other client.
+
+All the other methods from DBAccess also appear in DBSearchFriendlyAccess in
+a slightly modified form. The reason for this is that a decision has been made
+not to modify DBAccess, the database interface supplied by Sun.
+Rather, with its slightly modified yet compatible methods,
+DBSearchFriendlyAccess can now be considered the new reference for the database
+access.
+
+Two modifications deserve to be mentioned. The first is that the checked
+exception DuplicateKeyException has been dropped. No method ever throws this,
+especially not createRecord. As mentioned elsewhere, a record's key is the
+record number which has nothing to do with the content of the fields of the
+record. Two records with exactly the same fields (but different record numbers)
+could legally coexist in the database. If this was not the intention of
+the designers of the interface DBAccess, then at least updateRecord would
+also have to throw DuplicateKeyException (which it does not), so it has been
+dropped in DBSearchFriendlyAccess altogether. As Data, the data access class,
+implements DBSearchFriendlyAccess (which extends DBAccess),
+a DuplicateKeyException cannot possibly be thrown. 
+
+The second modification is a hint in the Javadoc that each method may throw
+a DatabaseException. Unfortunately, this exception can only be a runtime
+exception; otherwise it had to be declared in DBAccess as well.
+Any exceptional condition that is not already covered by one of the exceptions
+declared in DBAccess, like RecordNotFoundException or SecurityException,
+is wrapped in a DatabaseException and propagated upwards as such.
+
+2.7  Cookies
+
+Cookies are just consecutively numbered long values. No attempt has been made
+to somehow protect cookies by trying to generate arbitrary values that are both
+unique and hard to guess. Although it was recognized that this is an important,
+non-trivial problem, it was felt that providing a real solution to this problem
+would be beyond the scope of this project.
+
+
+3  Network communication approach
+
+3.1  Having to choose between RMI and sockets, RMI was chosen for the following
+reasons:
+
+- RMI is the more mature technology.
+  It is on a higher level of abstraction and is based on sockets.
+- The details of object serialization and network communication are hidden
+  by RMI, whereas using sockets they have to be implemented.
+  So a basic technology that already exists in RMI would have to be
+  reinvented when using sockets meaning more code.
+- RMI provides network transparency meaning that to a client a remote object
+  seems to behave as if it is a local object. There is no need to implement
+  a handshake protocol or worry about several other low-level details
+  such as allocating socket connections.
+- Code to call a remote method is automatically type-safe with RMI.
+  With a socket solution, there is no inherent requirement to use interfaces.
+  Providing type safety again means more code.
+- RMI already provides a multithreaded server. The user-level server code
+  does not have to spawn threads or manage thread pools, which RMI provides
+  for free.
+- The RMI registry helps to deploy the server-side code dynamically using the
+  rebind method of the Registry class with a minimum of downtime.
+- RMI allows to download executable classes. Although not relevant in the
+  context of the project, this feature could be interesting for further
+  extensions.
+
+Sockets have their advantages, though:
+- A socket-based solution could be potentially more efficient
+  as it can limit the degree of overhead.
+  A sockets solution should require less sockets and network traffic
+  between client and server.
+  A well-designed, simple socket interface can outperform an RMI-based server.
+  However, this kind of performance is not a major concern for the project.
+- Another, more important advantage of sockets is that it may be easier
+  to configure the system to let the application pass a firewall.
+  However, it is possible (albeit more complicated) to configure RMI to work
+  through a firewall.
+- General client identification is easier in a sockets solution -
+  the connection's thread can be used to identify the client.
+  However, in the lean client setting, the server doesn't actually need to
+  identify the client. The server doesn't care at all who sent a request.
+- With sockets, there is less of a chance that somebody else will
+  accidentally disable the server. With RMI, if another server happened
+  to call the Registry's rebind method with the same remote reference name,
+  this will replace the server code. With sockets, once the server has been
+  bound to a particular port, no other server can do so.
+
+3.2  Business services: local vs. remote access
+
+The business services interface was introduced to enable lean clients.
+Both the standalone and the networked client rely on this interface.
+Technically, the methods (that become remote methods in the networked setting)
+were declared to throw a RemoteException. So even the standalone client,
+when accessing the model via the business services interface, has to handle
+RemoteExceptions even though they are never thrown locally.
+
+The BusinessServices interface is implemented by the ContractorManager class.
+The contractor manager is responsible for all the data access-related stuff.
+The standalone client directly calls a method implemented by the
+contractor manager via its business services interface.
+
+The networked client also calls methods via the same business services
+interface. However, this interface is extended by an interface called
+ContractorManagerRemote, which is implemented by ContractorManagerRemoteImpl.
+ContractorManagerRemoteImpl is an adapter for ContractorManager.
+The methods the networked client calls are implemented by
+ContractorManagerRemoteImpl yet forwarded according to the adapter pattern
+to corresponding methods of ContractorManager (in fact, even the method names
+and signatures match, except for the RemoteException missing in the case of
+ContractorManager).
+
+This approach seems sound in that it provides a single business services
+interface to all kinds of clients, whether networked or standalone.
+This is important as the client code using the business services
+must not be aware of whether those methods are called directly or over the
+network. The tradeoff having been made is that the client code has to have
+code for handling the RemoteException even though it is known that,
+in the case of the standalone client, this exception will never ne thrown.
+
+3.3  Employing the remote observer pattern
+
+It was decided to employ the remote observer pattern in the context of the MVC
+to allow clients to react on a shutdown of the server. This functionality
+enhancement is not crucial. As long as the server is running, the remote
+observer code isn't called at all. Only with a server shutdown are its
+connected clients notified of this event. A client then display a notification
+in a message window to the user and disabled all controls except for the
+menu exit and window closing control (scrolling the table is also still
+possible).
+
+If, for same reason, a client cannot be notified (possible if the client
+is wrongly configured), this client just doesn't get the information that
+the server is going down. When this client sends a request to the server and
+the server is down, an error message is generated and displayed in a message
+window, informing the user about the problem. The user is then free to exit
+the client, just like in the notification case.
+
+With the remote observer pattern in place, however, the way has been paved for
+future extensions in this direction. 
+
+
+4  GUI
+
+4.1  General considerations
+
+The user interface is designed for ease of use and compliance with generally
+accepted standards, following good human/computer interaction principles.
+For instance, the user interface is ergonomically designed so that it can be
+operated without mouse support. The menu has been enriched by mnemonics.
+All buttons and input fields and other controls have been fitted with
+tool tips. When an input field holds the focus and the user hits Enter,
+a click on the related button (Search, Book, Start server, Connect, ...)
+is emulated. The Escape key emulates a click on the Cancel button. The
+application controls can be navigated with the Tab key. Even drag-and-drop and
+copy-and-paste support (from the a table field to a search input field) have
+been enabled. Everything is in its place where a user unfamiliar with this
+application would expect it to be.
+
+4.2  Drag-and-drop (DnD) and copy-and-paste (CnP) support
+
+Observing that the default behavior when copying a table row and pasting it to
+a search input field is somewhat strange, it was decided to repair this by
+transferring only the selected table cell rather than the entire table row.
+Also, DnD support was explicitly enabled to give the user one more option
+of quickly filling the search text input fields.
+
+4.3  Checked text field with validity change listener
+
+An effort has been made to create a kind of input text field that is able to
+filter input characters, only allowing certain characters through, and that
+can be provided with logic to decide whether the text input so far
+constitutes valid input. Furthermore, the notion of a validity change listener
+has been developed and modeled compatible to Swing's event listener mechanism. 
+With this, is is possible to enable/disable controls while text is being
+entered into a checked input text field.
+For instance, for the port number field, it can be enforced that only digits
+are accepted as input (every other character is rejected right away) and that
+no more than five digits are permitted. Moreover, the entered text is checked
+continuously with each new character entered or deleted so that it can be
+detected and signaled when the text in the input field changes its validity
+state.  
+
+The checked text field serves two purposes: Invalid characters are rejected
+right away. Related controls are only enabled after the input text has been
+verified. For instance, if the port number field contains a number that is not
+in the range between zero and 65535, then the Connect button cannot be clicked.
+If, on the other hand, the Connect button can be clicked, then no further
+verification is necessary on the part of the controller (of the MVC).
+Similar considerations hold for the database location (path) input field.
+It is checked that the input of this field refers to a regular file
+(but no more). Obviously, the actual operation could still fail, and this
+failure case has to be handled. Yet the controller is spared from dealing
+with very trivial faulty input.
+
+4.4  General dialog for all edit operations on table rows
+
+For the booking operation, a much more general edit contractor dialog has been
+designed as it is reasonable to anticipate further functionality enhancements
+like create and update contractor. This dialog has been designed so that it can
+be adapted easily to other edit operations.
+
+4.5  Decision that clients not be notified on database changes
+
+A decision has been made not to rely on the notification mechanism of the MVC
+(with the model component notifying the view of changes on the model)
+to keep the table of records up to date. Rather, the table can be easily
+updated manually by clicking the Search button again (with the contents of the 
+search input fields unchanged). Furthermore, the table is updated automatically
+at the end of a booking operation (whether successful or not). That is,
+the table is updated on each client request to the server. As this is compatible
+with the HTTP protocol, the approach chosen does not contradict an extension
+toward a Web-based environment.
+
+4.6  Custom rather than default table model
+
+For the records table implementation, a custom table model has been
+preferred to the default table model. Although the default table model
+is easier to use, it comes with the following disadvantages:
+- Every cell is automatically mad editable. This is absolutely not wanted.
+- All data types are treated the same (as strings). However, size, rate, and
+  owner should better be treated as numbers so that they become right-aligned.
+- All of the table's data must be put into an array or vector.
+  For reference purposes, to each record displayed in the table, a record number
+  must be kept somewhere. This record number is needed to identify the record
+  and is conceptually attached to the record. Yet it is not displayed.
+  So the record numbers are stored in a hidden array list inside the
+  custom table model (ContractorTableModel). This would not be possible
+  using the default table model.
+
+The custom table model chosen allows to get around the above-mentioned
+restrictions.
+
+
+5  Error handling
+
+Errors are handled through proper and consequent use of try-catch-finally
+constructs. The mechanism employed is exception chaining. A caught exception
+is wrapped by an exception of the next higher level, e.g.,
+a DatabaseFileException is wrapped by a DatabaseException ,to finally be wrapped
+by a ServicesException. Finally, a message window pops up in the GUI
+displaying all the exceptions' messages in a chain. After confirming the
+message window, the user may then take appropriate steps (like exiting the
+application). To reiterate: Exceptions are always caught and propagated up
+the chain to the GUI where all the messages in the exception chain are
+displayed. It is then up to the user to decide how to proceed. Under no
+circumstances is the application terminated automatically.
+
+During startup, if an exception is caught, its message chain is displayed
+as just described. After confirming the message window, the user is given
+another try. He might decide to change some configuration parameters like
+the hostname of the server, the port number, or the database location and
+attempt to start the server again or connect to the server (network client)
+or connect to the database (standalone client). This is repeated until either
+the application can be started properly, or the user explicitly exits the
+application. Never is the application exited automatically, not even in the
+startup phase.
+
+Some minor, relatively insignificant errors do not trigger a message window.
+They are just reported via the logging mechanism. For instance, if a client
+cannot be notified about the server shutting down (which is not critical at
+all), this event is only logged by the server and no message window opens.
+
+Last, but not least, before submission, the input of various text input fields
+is checked on reasonableness. For this, a new utility class CheckedTextField
+derived from JTextField has been developed. This class devises a strategy to
+avoid input errors before they have a chance to even appear.
+A user is prevented from submitting input text that is obviously wrong.
+For instance, letters cannot be entered into the port number field, just digits.
+A port number that is out of range causes the corresponding button control
+to be grayed.
+This enhances, but does not replace error handling by avoiding errors early on.
+
+
+6  Future modifications
+
+6.1  Extensibility of functionality: create, update, unbook, delete record
+
+- There is an obvious place for additional buttons (in the button list).
+- There is an EditContractorDialog prepared for all kinds of edit operations,
+  not just book.
+- The book operation even anticipates other operations taking place
+  (delete, update) and already handles them appropriately (although in the
+  absence of the extended functionality, the handling code is never executed).
+
+6.2  Extensibility toward server notification framework
+
+The server notification framework (remote observer pattern with the server
+being the observable) has already been established yet used only for
+the relatively marginal server shutdown notification. This could be easily
+extended toward notifications of model updates. The interesting part would be
+the client's in how to handle those model state change notifications under
+the various state a client can be in.
+
+Note that this extension would be somewhat incompatible with a possible Web
+extension which is laid out next.
+
+6.3  Extensibility toward Web-based interface
+
+A Web-based solution requires the client to run in a Web browser.
+
+- The client view obviously needed to be replaced.
+- The RMI-based network communication module also needed to be replaced.
+- The model part (ContractorManager implementing BusinessServices and using the
+  DAO) may be kept yet needed a Web adapter; i.e., the model part of the MVC
+  (unsurprisingly) would remain largely intact whereas the view-controller
+  ought to be replaced.
+- Stateless protocol already in place. Server has no knowledge about the
+  identity of a request's client, let alone record it.
+- No need for notifications of clients by the server. This is not possible
+  on the Web with its request/response cycle anyway where the server always
+  responds to client requests. Only exception at the moment: server shutdown
+  notification (would have to be abandoned).

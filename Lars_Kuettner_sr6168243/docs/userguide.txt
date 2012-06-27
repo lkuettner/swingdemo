@@ -1,0 +1,143 @@
+User Documentation for the
+Bodgitt and Scarper Home Improvement Contractor Booking System v1.0
+
+The booking system is inherently distributed across several machines, requiring
+exactly one database server to run serving multiple network clients.
+Alternatively, the booking application can be operated in stand-alone mode with
+exactly one stand-alone client providing both the GUI to the user and direct
+access to the database.
+
+1  Installation
+
+Simple: just unpack the jar file and change to the jar's root directory
+containing the executable runme.jar.
+
+
+2  How to start the application
+
+2.1  Networked mode
+
+For the application to work in networked mode, there must be exactly one server
+and at least one network client running. As a network client attempts to connect
+to the server right on startup, the server must be running to start a client.
+
+2.1.1  Database server
+
+To start the database server, type the following command into a command shell:
+
+	java -jar runme.jar server
+
+This brings up the server GUI in configuration mode where both the database
+location and port number can be configured. Preset are the persisted values
+from the most recent invocation of runme.jar from the current directory.
+If the choices in all the input text fields appear reasonable, with the
+database location referring to a readable and writable file and the port number
+to a number between 0 and 65535, the "Start server" button is enabled.
+After carefully providing both the database location and the port number,
+click "Start server" to start the server.
+
+CAUTION: Note that there must be no more than a single server or stand-alone
+client running at any particular point in time. It is up to the user starting
+the application to enforce this constraint!
+
+2.1.2  Network client
+
+To start a network client, type the following command into a command shell:
+
+	java -jar runme.jar
+
+This brings up the network client GUI and atop of this a configuration
+dialog to enter end confirm basic configuration parameters, in particular the
+hostname or IP address of the machine running the database server and the port
+number the server is listening. Carefully provide these information before
+clicking "Connect" to connect network client and server. Upon successful
+connection, a request is automatically generated asking the server to provide
+all database records, and the records table is filled accordingly.
+
+2.2  Stand-alone mode
+
+2.2.1  Stand-alone client
+
+To start the application in stand-alone mode, type the following command into a
+command shell:
+
+	java -jar runme.jar alone
+
+This brings up the stand-alone client GUI and atop of this a configuration
+dialog to enter and confirm the database location. Provide the path name to
+the database file and click "Connect" to "connect" the stand-alone client
+to the database. A search request for all records is made to the database,
+and the records table is filled accordingly.
+
+
+3  How to operate the client (network and stand-alone alike)
+
+So far, the client provides two operations: search the database for contractors
+based on their name and/or location, and book a contractor if still available.
+
+3.1  Search
+
+To search the database, use the search panel in the upper area of the client
+window. Provide the exact name of the contractor and/or the exact location at
+which to search for a contractor. The database is searched for exact,
+case-sensitive matches. Either input field can be left empty meaning that
+everything matches. Click the "Search" button or hit Enter to conduct the
+actual search. The search results are subsequently displayed in the table.
+
+3.2  Book
+
+Any contractor record displayed in a table row that has not already been booked,
+may be booked. In order to get booked, a record row first has to be selected.
+Upon selecting a bookable record, the "Book" button in the lower area of the
+client window is enabled. (If no record is selected or the selected record has
+already been booked, the "Book" button is grayed). Upon clicking the "Book"
+button, the Book Contractor" dialog opens, with the input focus in the owner
+text input field. Provide a meaningful owner ID, i.e., an 8-digit number, then
+click "OK" to get the booking operation performed (actually, attempted).
+Pending the concurrent activity of other clients, the booking may succeed or
+fail. Fail it will when the contractor record has been intermittently booked,
+modified, or deleted by some other agent (client). In any case, the result of
+the booking operation is displayed in a notification window atop the
+"Book Contractor" dialog, which has to be confirmed.
+
+4  How to shutdown the application
+
+Both the server and client windows may be exited at any time. When the server
+is exited, all currently running clients cannot resume working and must
+subsequently (yet manually) be exited. 
+
+4.1  Database server
+
+The server may be shut down by clicking the "Exit" button or closing the window.
+Upon shutting down the server, all clients automatically registered as observers
+to this event get notified about the shutdown of the server. As a client
+without a server cannot meaningfully resume operations, a message window pops
+up atop each client informing the user about the server having gone down.
+Moreover, all functionality on the client side (like search and book) is
+disabled except for the various means to exit the client (via the menu and
+by closing the window), which is the only thing that remains to be done by
+the user of the client at a time of her choosing.
+
+4.2  Client (both network and stand-alone)
+
+A client may be exited any time either via the menu (File => Exit) or by closing
+the window. Neither the server nor any other client will be affected by this
+operation.
+
+
+5  Troubleshooting
+
+5.1  Clicking "Start server" or "Connect" (client) yields an error.
+
+Solution: Carefully analyze the error message, then confirm the notification
+window. Re-adjust the original configuration parameters and try to start or
+connect to the server (or database) again.
+
+5.2  Database file might appear to be in an inconsistent state.
+
+Solution: Make sure the application is running in server mode or stand-alone
+client mode at most once. Enforcing this is the responsibility of the user
+starting the application.
+
+For any other problem or feedback, send an informal bug report to
+lkuettner@yahoo.com.

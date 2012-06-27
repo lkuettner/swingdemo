@@ -1,0 +1,9 @@
+Version 1.0
+
+Exact version of JDK used:
+java version "1.6.0_20"
+Java(TM) SE Runtime Environment (build 1.6.0_20-b02)
+Java HotSpot(TM) Client VM (build 16.3-b01, mixed mode, sharing)
+
+Host platform worked on:
+Microsoft Vista Business Edition 32 Bit, Service Pack 2
